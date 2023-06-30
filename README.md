@@ -20,8 +20,8 @@ For [RangeLibc](https://github.com/f1tenth/range_libc):
 
 ```
 sudo pip install cython
-git clone http://github.com/kctess5/range_libc
-cd range_libc/pywrappers
+git clone https://github.com/f1tenth/range_libc
+cd range_libc/pywrapper
 # on VM
 ./compile.sh
 # on car - compiles GPU ray casting methods
