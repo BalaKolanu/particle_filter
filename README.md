@@ -44,6 +44,16 @@ The "range_method" parameter determines which RangeLibc ray casting method to us
 
 ![Range Method Performance Comparison](./media/comparison.png)
 
+## GPU Mode Notes
+
+The default `config/localize.yaml` now sets:
+
+- `range_method: rmgpu`
+- `require_gpu: true` (node exits if CUDA ray marching is unavailable)
+- `gpu_resample_motion: true` (optional CuPy acceleration for proposal + motion)
+
+`gpu_resample_motion` is optional and falls back to NumPy when `cupy` is not installed.
+
 # Docs
 
 This code is the staff solution to the lab guide found in the [/docs](/particle_filter/docs) folder. A mathematical derivation of MCL is available in that guide.

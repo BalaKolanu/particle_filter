@@ -26,7 +26,6 @@ from launch.substitutions import LaunchConfiguration
 from launch.actions import DeclareLaunchArgument
 from ament_index_python.packages import get_package_share_directory
 import os
-import yaml
 
 def generate_launch_description():
     # config and args
@@ -35,26 +34,36 @@ def generate_launch_description():
         'config',
         'localize.yaml'
     )
-    localize_config_dict = yaml.safe_load(open(localize_config, 'r'))
-    map_name = localize_config_dict['map_server']['ros__parameters']['map']
+    map_yaml = '/home/nvidia/spring26_ws/maps/apt_floor_2.yaml'
     localize_la = DeclareLaunchArgument(
         'localize_config',
         default_value=localize_config,
         description='Localization configs')
-    ld = LaunchDescription([localize_la])
+    map_yaml_la = DeclareLaunchArgument(
+        'map_yaml',
+        default_value=map_yaml,
+        description='Full path to occupancy map yaml file')
+    odometry_topic_la = DeclareLaunchArgument(
+        'odometry_topic',
+        default_value='/odom',
+        description='Odometry topic consumed by particle_filter')
+    ld = LaunchDescription([localize_la, map_yaml_la, odometry_topic_la])
 
     # nodes
     pf_node = Node(
         package='particle_filter',
         executable='particle_filter',
         name='particle_filter',
-        parameters=[LaunchConfiguration('localize_config')]
+        parameters=[
+            LaunchConfiguration('localize_config'),
+            {'odometry_topic': LaunchConfiguration('odometry_topic')},
+        ]
     )
     map_server_node = Node(
         package='nav2_map_server',
         executable='map_server',
         name='map_server',
-        parameters=[{'yaml_filename': os.path.join(get_package_share_directory('particle_filter'), 'maps', map_name + '.yaml')},
+        parameters=[{'yaml_filename': LaunchConfiguration('map_yaml')},
                     {'topic': 'map'},
                     {'frame_id': 'map'},
                     {'output': 'screen'},

@@ -12,7 +12,12 @@ particle_filter:
     max_viz_particles: 60
     # ray marching method
     range_method: 'rmgpu'
+    # fail fast if GPU ray marching is unavailable
+    require_gpu: true
     theta_discretization: 112
+    # optional CuPy offload for proposal sampling + motion model
+    gpu_resample_motion: true
+    cupy_device_id: 0
     # range data filtering
     max_range: 10
     fine_timing: 0
