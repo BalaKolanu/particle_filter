@@ -75,9 +75,10 @@ def rotation_matrix(theta):
 def particle_to_pose(particle):
     ''' Converts a particle in the form [x, y, theta] into a Pose object '''
     pose = Pose()
-    pose.position.x = particle[0]
-    pose.position.y = particle[1]
-    pose.orientation = angle_to_quaternion(particle[2])
+    # ROS2 message fields require native Python float, not numpy/cupy scalar types.
+    pose.position.x = float(particle[0])
+    pose.position.y = float(particle[1])
+    pose.orientation = angle_to_quaternion(float(particle[2]))
     return pose
 
 def particles_to_poses(particles):

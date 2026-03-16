@@ -383,12 +383,13 @@ class ParticleFiler(Node):
         ls = LaserScan()
         ls.header.stamp = self.last_stamp
         ls.header.frame_id = self.LASER_FRAME
-        ls.angle_min = np.min(angles)
-        ls.angle_max = np.max(angles)
-        ls.angle_increment = np.abs(angles[0] - angles[1])
-        ls.range_min = 0
-        ls.range_max = np.max(ranges)
-        ls.ranges = ranges
+        ls.angle_min = float(np.min(angles))
+        ls.angle_max = float(np.max(angles))
+        ls.angle_increment = float(np.abs(angles[0] - angles[1]))
+        ls.range_min = 0.0
+        ls.range_max = float(np.max(ranges))
+        # LaserScan.ranges expects a sequence of Python float values.
+        ls.ranges = [float(r) for r in np.asarray(ranges).tolist()]
         self.pub_fake_scan.publish(ls)
 
     def _laser_pose_to_base_pose(self, laser_pose):
