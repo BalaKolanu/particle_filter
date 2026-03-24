@@ -22,6 +22,8 @@ particle_filter:
     max_range: 10
     fine_timing: 0
     publish_odom: 1
+    publish_tf_mode: 'map_to_odom'
+    odom_frame: 'odom'
     # sensor model constants
     z_short: 0.01
     z_max: 0.07

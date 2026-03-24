@@ -59,6 +59,37 @@ VAR_REPEAT_ANGLES_EVAL_SENSOR_ONE_SHOT = 3
 VAR_RADIAL_CDDT_OPTIMIZATIONS = 4
 
 
+def _norm_angle(angle):
+    while angle > np.pi:
+        angle -= 2.0 * np.pi
+    while angle < -np.pi:
+        angle += 2.0 * np.pi
+    return angle
+
+
+def _inverse_pose_2d(pose):
+    x, y, theta = pose
+    c = np.cos(theta)
+    s = np.sin(theta)
+    return np.array([
+        -(c * x + s * y),
+        s * x - c * y,
+        -theta,
+    ], dtype=np.float32)
+
+
+def _compose_pose_2d(lhs, rhs):
+    x1, y1, t1 = lhs
+    x2, y2, t2 = rhs
+    c = np.cos(t1)
+    s = np.sin(t1)
+    return np.array([
+        x1 + c * x2 - s * y2,
+        y1 + s * x2 + c * y2,
+        _norm_angle(t1 + t2),
+    ], dtype=np.float32)
+
+
 class ParticleFiler(Node):
     '''
     This class implements Monte Carlo Localization based on odometry and a laser scanner.
@@ -97,6 +128,8 @@ class ParticleFiler(Node):
         self.declare_parameter('require_gpu', False)
         self.declare_parameter('gpu_resample_motion', False)
         self.declare_parameter('cupy_device_id', 0)
+        self.declare_parameter('publish_tf_mode', 'map_to_base_link')
+        self.declare_parameter('odom_frame', 'odom')
 
         # parameters
         self.ANGLE_STEP           = self.get_parameter('angle_step').value
@@ -130,6 +163,14 @@ class ParticleFiler(Node):
         self.REQUIRE_GPU             = bool(self.get_parameter('require_gpu').value)
         self.GPU_RESAMPLE_MOTION     = bool(self.get_parameter('gpu_resample_motion').value)
         self.CUPY_DEVICE_ID          = int(self.get_parameter('cupy_device_id').value)
+        self.PUBLISH_TF_MODE         = str(self.get_parameter('publish_tf_mode').value)
+        self.ODOM_FRAME              = str(self.get_parameter('odom_frame').value)
+
+        if self.PUBLISH_TF_MODE not in ('map_to_base_link', 'map_to_odom'):
+            self.get_logger().warning(
+                "Unknown publish_tf_mode '%s', falling back to 'map_to_base_link'" % self.PUBLISH_TF_MODE
+            )
+            self.PUBLISH_TF_MODE = 'map_to_base_link'
 
         # various data containers used in the MCL algorithm
         self.MAX_RANGE_PX = None
@@ -152,6 +193,8 @@ class ParticleFiler(Node):
         self.particles_gpu = None
         self.weights_gpu = None
         self.local_deltas_gpu = None
+        self.latest_odom_pose = None
+        self.latest_odom_frame = self.ODOM_FRAME
 
         # cache this to avoid memory allocation in motion model
         self.local_deltas = np.zeros((self.MAX_PARTICLES, 3), dtype=np.float32)
@@ -296,23 +339,28 @@ class ParticleFiler(Node):
         self.map_initialized = True
 
     def publish_tf(self, pose, stamp=None):
-        ''' Publish a tf for the car. This tells ROS where the car is with respect to the map. '''
+        '''Publish the localization TF output for the car.'''
         if stamp == None:
             stamp = self.get_clock().now().to_msg()
 
         base_pose = self._laser_pose_to_base_pose(pose)
 
         t = TransformStamped()
-        # header
         t.header.stamp = stamp
-        t.header.frame_id = self.MAP_FRAME
-        t.child_frame_id = self.TF_CHILD_FRAME
-        # translation
-        t.transform.translation.x = float(base_pose[0])
-        t.transform.translation.y = float(base_pose[1])
+
+        if self.PUBLISH_TF_MODE == 'map_to_odom' and isinstance(self.latest_odom_pose, np.ndarray):
+            tf_pose = _compose_pose_2d(base_pose, _inverse_pose_2d(self.latest_odom_pose))
+            t.header.frame_id = self.MAP_FRAME
+            t.child_frame_id = self.latest_odom_frame
+        else:
+            tf_pose = np.array(base_pose, dtype=np.float32)
+            t.header.frame_id = self.MAP_FRAME
+            t.child_frame_id = self.TF_CHILD_FRAME
+
+        t.transform.translation.x = float(tf_pose[0])
+        t.transform.translation.y = float(tf_pose[1])
         t.transform.translation.z = 0.0
-        q = tf_transformations.quaternion_from_euler(0., 0., base_pose[2])
-        # rotation
+        q = tf_transformations.quaternion_from_euler(0., 0., tf_pose[2])
         t.transform.rotation.x = q[0]
         t.transform.rotation.y = q[1]
         t.transform.rotation.z = q[2]
@@ -433,6 +481,8 @@ class ParticleFiler(Node):
         orientation = Utils.quaternion_to_angle(msg.pose.pose.orientation)
         pose = np.array([position[0], position[1], orientation])
         self.current_speed = msg.twist.twist.linear.x
+        self.latest_odom_pose = pose
+        self.latest_odom_frame = msg.header.frame_id if msg.header.frame_id else self.ODOM_FRAME
 
         if isinstance(self.last_pose, np.ndarray):
             # changes in x,y,theta in local coordinate system of the car
