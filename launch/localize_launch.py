@@ -24,6 +24,7 @@ from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.substitutions import LaunchConfiguration
 from launch.actions import DeclareLaunchArgument
+from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 import os
 
@@ -47,7 +48,13 @@ def generate_launch_description():
         'odometry_topic',
         default_value='/odom',
         description='Odometry topic consumed by particle_filter')
-    ld = LaunchDescription([localize_la, map_yaml_la, odometry_topic_la])
+    use_sim_time_la = DeclareLaunchArgument(
+        'use_sim_time',
+        default_value='false',
+        description='Use simulation clock instead of wall clock')
+    ld = LaunchDescription(
+        [localize_la, map_yaml_la, odometry_topic_la, use_sim_time_la]
+    )
 
     # nodes
     pf_node = Node(
@@ -56,7 +63,13 @@ def generate_launch_description():
         name='particle_filter',
         parameters=[
             LaunchConfiguration('localize_config'),
-            {'odometry_topic': LaunchConfiguration('odometry_topic')},
+            {
+                'odometry_topic': LaunchConfiguration('odometry_topic'),
+                'use_sim_time': ParameterValue(
+                    LaunchConfiguration('use_sim_time'),
+                    value_type=bool,
+                ),
+            },
         ]
     )
     map_server_node = Node(
@@ -67,14 +80,24 @@ def generate_launch_description():
                     {'topic': 'map'},
                     {'frame_id': 'map'},
                     {'output': 'screen'},
-                    {'use_sim_time': True}]
+                    {
+                        'use_sim_time': ParameterValue(
+                            LaunchConfiguration('use_sim_time'),
+                            value_type=bool,
+                        )
+                    }]
     )
     nav_lifecycle_node = Node(
         package='nav2_lifecycle_manager',
         executable='lifecycle_manager',
         name='lifecycle_manager_localization',
         output='screen',
-        parameters=[{'use_sim_time': True},
+        parameters=[{
+                        'use_sim_time': ParameterValue(
+                            LaunchConfiguration('use_sim_time'),
+                            value_type=bool,
+                        )
+                    },
                     {'autostart': True},
                     {'node_names': ['map_server']}]
     )

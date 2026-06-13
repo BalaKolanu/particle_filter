@@ -288,12 +288,56 @@ class ParticleFiler(Node):
         RangeLibc method. Also stores a matrix which indicates the permissible region of the map
         '''
 
-        while not self.map_client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('Get map service not available, waiting...')
-        req = GetMap.Request()
-        future = self.map_client.call_async(req)
-        rclpy.spin_until_future_complete(self, future)
-        map_msg = future.result().map
+        map_msg = None
+        while rclpy.ok():
+            while not self.map_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().info('Get map service not available, waiting...')
+                if not rclpy.ok():
+                    raise RuntimeError('ROS shut down while waiting for map service.')
+
+            req = GetMap.Request()
+            future = self.map_client.call_async(req)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+
+            if not future.done():
+                self.get_logger().warning(
+                    'Map service request timed out; waiting for map_server activation.'
+                )
+                continue
+
+            try:
+                response = future.result()
+            except Exception as ex:
+                self.get_logger().warning(
+                    'Map service request failed: %s. Retrying.' % str(ex)
+                )
+                continue
+
+            if response is None:
+                self.get_logger().warning(
+                    'Map service returned no response; retrying.'
+                )
+                continue
+
+            candidate = response.map
+            if (
+                candidate.info.resolution <= 0.0
+                or candidate.info.width <= 0
+                or candidate.info.height <= 0
+                or len(candidate.data) == 0
+            ):
+                self.get_logger().warning(
+                    'Map server is not active or returned an empty map; retrying.'
+                )
+                time.sleep(0.25)
+                continue
+
+            map_msg = candidate
+            break
+
+        if map_msg is None:
+            raise RuntimeError('Unable to obtain a valid occupancy map.')
+
         self.map_info = map_msg.info
 
         oMap = range_libc.PyOMap(map_msg)
