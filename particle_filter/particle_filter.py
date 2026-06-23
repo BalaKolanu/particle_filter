@@ -510,7 +510,8 @@ class ParticleFiler(Node):
         # store the necessary scanner information for later processing
         self.downsampled_ranges = np.array(msg.ranges[::self.ANGLE_STEP])
         self.lidar_initialized = True
-        # self.update()
+        self.last_stamp = msg.header.stamp
+        self.update()
 
     def odomCB(self, msg):
         '''
@@ -533,17 +534,23 @@ class ParticleFiler(Node):
             rot = Utils.rotation_matrix(-self.last_pose[2])
             delta = np.array([position - self.last_pose[0:2]]).transpose()
             local_delta = (rot*delta).transpose()
-            
-            self.odometry_data = np.array([local_delta[0,0], local_delta[0,1], orientation - self.last_pose[2]])
+
+            delta_pose = np.array(
+                [
+                    local_delta[0, 0],
+                    local_delta[0, 1],
+                    _norm_angle(orientation - self.last_pose[2]),
+                ],
+                dtype=np.float32,
+            )
+            self.odometry_data = _compose_pose_2d(self.odometry_data, delta_pose)
             self.last_pose = pose
-            self.last_stamp = msg.header.stamp
             self.odom_initialized = True
         else:
             self.get_logger().info('...Received first Odometry message')
             self.last_pose = pose
 
-        # this topic is slower than lidar, so update every time we receive a message
-        self.update()
+        # Particle filter correction is scan-driven; odometry accumulates between scans.
 
     def clicked_pose(self, msg):
         '''
