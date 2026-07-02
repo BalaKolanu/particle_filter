@@ -16,7 +16,7 @@ particle_filter:
     require_gpu: true
     theta_discretization: 112
     # optional CuPy offload for proposal sampling + motion model
-    gpu_resample_motion: true
+    gpu_resample_motion: false
     cupy_device_id: 0
     # range data filtering
     max_range: 10
