@@ -43,7 +43,7 @@ import tf_transformations
 
 # messages
 from std_msgs.msg import String, Header, Float32MultiArray
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import Joy, LaserScan
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point, Pose, PoseStamped, PoseArray, Quaternion, PolygonStamped, Polygon, Point32, PoseWithCovarianceStamped, PointStamped, TransformStamped
 from nav_msgs.msg import Odometry
@@ -130,6 +130,9 @@ class ParticleFiler(Node):
         self.declare_parameter('cupy_device_id', 0)
         self.declare_parameter('publish_tf_mode', 'map_to_base_link')
         self.declare_parameter('odom_frame', 'odom')
+        self.declare_parameter('relocalize_joy_topic', '/joy')
+        self.declare_parameter('relocalize_button_index', 0)
+        self.declare_parameter('relocalize_exclusion_radius', 1.0)
 
         # parameters
         self.ANGLE_STEP           = self.get_parameter('angle_step').value
@@ -165,6 +168,12 @@ class ParticleFiler(Node):
         self.CUPY_DEVICE_ID          = int(self.get_parameter('cupy_device_id').value)
         self.PUBLISH_TF_MODE         = str(self.get_parameter('publish_tf_mode').value)
         self.ODOM_FRAME              = str(self.get_parameter('odom_frame').value)
+        self.RELOCALIZE_JOY_TOPIC    = str(self.get_parameter('relocalize_joy_topic').value)
+        self.RELOCALIZE_BUTTON_INDEX = int(self.get_parameter('relocalize_button_index').value)
+        self.RELOCALIZE_EXCLUSION_RADIUS = max(
+            0.0,
+            float(self.get_parameter('relocalize_exclusion_radius').value),
+        )
 
         if self.PUBLISH_TF_MODE not in ('map_to_base_link', 'map_to_odom'):
             self.get_logger().warning(
@@ -195,6 +204,7 @@ class ParticleFiler(Node):
         self.local_deltas_gpu = None
         self.latest_odom_pose = None
         self.latest_odom_frame = self.ODOM_FRAME
+        self.relocalize_button_pressed = False
 
         # cache this to avoid memory allocation in motion model
         self.local_deltas = np.zeros((self.MAX_PARTICLES, 3), dtype=np.float32)
@@ -279,8 +289,21 @@ class ParticleFiler(Node):
             '/clicked_point',
             self.clicked_pose,
             1)
+        self.joy_sub = self.create_subscription(
+            Joy,
+            self.RELOCALIZE_JOY_TOPIC,
+            self.joyCB,
+            10)
 
-        self.get_logger().info('Finished initializing, waiting on messages...')
+        self.get_logger().info(
+            'Finished initializing, waiting on messages... '
+            'Relocalization is bound to button %d on %s (%.2f m exclusion radius).'
+            % (
+                self.RELOCALIZE_BUTTON_INDEX,
+                self.RELOCALIZE_JOY_TOPIC,
+                self.RELOCALIZE_EXCLUSION_RADIUS,
+            )
+        )
 
     def get_omap(self):
         '''
@@ -561,6 +584,42 @@ class ParticleFiler(Node):
         elif isinstance(msg, PoseWithCovarianceStamped):
             self.initialize_particles_pose(msg.pose.pose)
 
+    def joyCB(self, msg):
+        """Globally relocalize on the rising edge of the configured joystick button."""
+        pressed = (
+            0 <= self.RELOCALIZE_BUTTON_INDEX < len(msg.buttons)
+            and msg.buttons[self.RELOCALIZE_BUTTON_INDEX] == 1
+        )
+
+        if pressed and not self.relocalize_button_pressed:
+            excluded_pose = None
+            if isinstance(self.inferred_pose, np.ndarray):
+                excluded_pose = np.copy(self.inferred_pose)
+
+            if excluded_pose is None:
+                self.get_logger().warning(
+                    'Relocalization requested before a pose was inferred; '
+                    'using the full permissible map.'
+                )
+            else:
+                self.get_logger().warning(
+                    'Relocalizing from joystick button %d; excluding %.2f m '
+                    'around the current pose (%.2f, %.2f).'
+                    % (
+                        self.RELOCALIZE_BUTTON_INDEX,
+                        self.RELOCALIZE_EXCLUSION_RADIUS,
+                        excluded_pose[0],
+                        excluded_pose[1],
+                    )
+                )
+
+            self.initialize_global(
+                excluded_pose=excluded_pose,
+                exclusion_radius=self.RELOCALIZE_EXCLUSION_RADIUS,
+            )
+
+        self.relocalize_button_pressed = pressed
+
     def initialize_particles_pose(self, pose):
         '''
         Initialize particles in the general region of the provided pose.
@@ -575,14 +634,40 @@ class ParticleFiler(Node):
         self.state_lock.release()
         self._sync_state_to_gpu()
 
-    def initialize_global(self):
+    def initialize_global(self, excluded_pose=None, exclusion_radius=0.0):
         '''
-        Spread the particle distribution over the permissible region of the state space.
+        Spread particles over permissible space, optionally avoiding a world-space pose.
         '''
         self.get_logger().info('GLOBAL INITIALIZATION')
         # randomize over grid coordinate space
-        self.state_lock.acquire()
         permissible_x, permissible_y = np.where(self.permissible_region == 1)
+
+        if excluded_pose is not None and exclusion_radius > 0.0:
+            origin = self.map_info.origin
+            origin_angle = Utils.quaternion_to_angle(origin.orientation)
+            dx = float(excluded_pose[0]) - origin.position.x
+            dy = float(excluded_pose[1]) - origin.position.y
+            c = np.cos(origin_angle)
+            s = np.sin(origin_angle)
+            excluded_map_x = (c * dx + s * dy) / self.map_info.resolution
+            excluded_map_y = (-s * dx + c * dy) / self.map_info.resolution
+            exclusion_radius_px = exclusion_radius / self.map_info.resolution
+            outside_exclusion = (
+                (permissible_y - excluded_map_x) ** 2
+                + (permissible_x - excluded_map_y) ** 2
+                >= exclusion_radius_px ** 2
+            )
+
+            if np.any(outside_exclusion):
+                permissible_x = permissible_x[outside_exclusion]
+                permissible_y = permissible_y[outside_exclusion]
+            else:
+                self.get_logger().warning(
+                    'Relocalization exclusion covers the entire permissible map; '
+                    'using the full map instead.'
+                )
+                permissible_x, permissible_y = np.where(self.permissible_region == 1)
+
         indices = np.random.randint(0, len(permissible_x), size=self.MAX_PARTICLES)
 
         permissible_states = np.zeros((self.MAX_PARTICLES,3), dtype=np.float32)
@@ -591,10 +676,11 @@ class ParticleFiler(Node):
         permissible_states[:,2] = np.random.random(self.MAX_PARTICLES) * np.pi * 2.0
 
         Utils.map_to_world(permissible_states, self.map_info)
-        self.particles = permissible_states
-        self.weights[:] = 1.0 / self.MAX_PARTICLES
-        self.state_lock.release()
-        self._sync_state_to_gpu()
+        with self.state_lock:
+            self.particles = permissible_states
+            self.weights[:] = 1.0 / self.MAX_PARTICLES
+            self.odometry_data[:] = 0.0
+            self._sync_state_to_gpu()
 
     def _sync_state_to_gpu(self):
         if not self.cupy_enabled:
