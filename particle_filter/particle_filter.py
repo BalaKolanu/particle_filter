@@ -23,6 +23,7 @@
 # ros2 python
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 
 # libraries
 import numpy as np
@@ -99,27 +100,27 @@ class ParticleFiler(Node):
         super().__init__('particle_filter')
 
         # declare parameters
-        self.declare_parameter('angle_step')
-        self.declare_parameter('max_particles')
-        self.declare_parameter('max_viz_particles')
-        self.declare_parameter('squash_factor')
-        self.declare_parameter('max_range')
-        self.declare_parameter('theta_discretization')
-        self.declare_parameter('range_method')
-        self.declare_parameter('rangelib_variant')
-        self.declare_parameter('fine_timing')
-        self.declare_parameter('publish_odom')
-        self.declare_parameter('viz')
-        self.declare_parameter('z_short')
-        self.declare_parameter('z_max')
-        self.declare_parameter('z_rand')
-        self.declare_parameter('z_hit')
-        self.declare_parameter('sigma_hit')
-        self.declare_parameter('motion_dispersion_x')
-        self.declare_parameter('motion_dispersion_y')
-        self.declare_parameter('motion_dispersion_theta')
-        self.declare_parameter('scan_topic')
-        self.declare_parameter('odometry_topic')
+        self.declare_parameter('angle_step', Parameter.Type.INTEGER)
+        self.declare_parameter('max_particles', Parameter.Type.INTEGER)
+        self.declare_parameter('max_viz_particles', Parameter.Type.INTEGER)
+        self.declare_parameter('squash_factor', Parameter.Type.DOUBLE)
+        self.declare_parameter('max_range', Parameter.Type.INTEGER)
+        self.declare_parameter('theta_discretization', Parameter.Type.INTEGER)
+        self.declare_parameter('range_method', Parameter.Type.STRING)
+        self.declare_parameter('rangelib_variant', Parameter.Type.INTEGER)
+        self.declare_parameter('fine_timing', Parameter.Type.INTEGER)
+        self.declare_parameter('publish_odom', Parameter.Type.INTEGER)
+        self.declare_parameter('viz', Parameter.Type.INTEGER)
+        self.declare_parameter('z_short', Parameter.Type.DOUBLE)
+        self.declare_parameter('z_max', Parameter.Type.DOUBLE)
+        self.declare_parameter('z_rand', Parameter.Type.DOUBLE)
+        self.declare_parameter('z_hit', Parameter.Type.DOUBLE)
+        self.declare_parameter('sigma_hit', Parameter.Type.DOUBLE)
+        self.declare_parameter('motion_dispersion_x', Parameter.Type.DOUBLE)
+        self.declare_parameter('motion_dispersion_y', Parameter.Type.DOUBLE)
+        self.declare_parameter('motion_dispersion_theta', Parameter.Type.DOUBLE)
+        self.declare_parameter('scan_topic', Parameter.Type.STRING)
+        self.declare_parameter('odometry_topic', Parameter.Type.STRING)
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('laser_frame', 'laser')
         self.declare_parameter('tf_child_frame', 'base_link')
