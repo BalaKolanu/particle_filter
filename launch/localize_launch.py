@@ -35,7 +35,7 @@ def generate_launch_description():
         'config',
         'localize.yaml'
     )
-    map_yaml = '/home/nvidia/spring26_ws/maps/apt_floor_2.yaml'
+    map_yaml = '/home/nvidia/f1tenth_ws/maps/apt_floor_2.yaml'
     localize_la = DeclareLaunchArgument(
         'localize_config',
         default_value=localize_config,
