@@ -48,12 +48,27 @@ def generate_launch_description():
         'odometry_topic',
         default_value='/odom',
         description='Odometry topic consumed by particle_filter')
+    wait_for_jax_ready_la = DeclareLaunchArgument(
+        'wait_for_jax_ready',
+        default_value='false',
+        description='Wait for MPCC JAX readiness before initializing particle-filter GPU state')
+    jax_ready_topic_la = DeclareLaunchArgument(
+        'jax_ready_topic',
+        default_value='/mpcc/jax_ready',
+        description='Latched MPCC JAX readiness topic consumed by particle_filter')
     use_sim_time_la = DeclareLaunchArgument(
         'use_sim_time',
         default_value='false',
         description='Use simulation clock instead of wall clock')
     ld = LaunchDescription(
-        [localize_la, map_yaml_la, odometry_topic_la, use_sim_time_la]
+        [
+            localize_la,
+            map_yaml_la,
+            odometry_topic_la,
+            use_sim_time_la,
+            wait_for_jax_ready_la,
+            jax_ready_topic_la,
+        ]
     )
 
     # nodes
@@ -69,6 +84,11 @@ def generate_launch_description():
                     LaunchConfiguration('use_sim_time'),
                     value_type=bool,
                 ),
+                'wait_for_jax_ready': ParameterValue(
+                    LaunchConfiguration('wait_for_jax_ready'),
+                    value_type=bool,
+                ),
+                'jax_ready_topic': LaunchConfiguration('jax_ready_topic'),
             },
         ]
     )

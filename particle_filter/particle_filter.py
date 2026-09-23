@@ -24,6 +24,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
 # libraries
 import numpy as np
@@ -43,7 +44,7 @@ from tf2_ros import TransformBroadcaster
 import tf_transformations
 
 # messages
-from std_msgs.msg import String, Header, Float32MultiArray
+from std_msgs.msg import Bool, String, Header, Float32MultiArray
 from sensor_msgs.msg import Joy, LaserScan
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point, Pose, PoseStamped, PoseArray, Quaternion, PolygonStamped, Polygon, Point32, PoseWithCovarianceStamped, PointStamped, TransformStamped
@@ -134,6 +135,8 @@ class ParticleFiler(Node):
         self.declare_parameter('relocalize_joy_topic', '/joy')
         self.declare_parameter('relocalize_button_index', 0)
         self.declare_parameter('relocalize_exclusion_radius', 1.0)
+        self.declare_parameter('wait_for_jax_ready', False)
+        self.declare_parameter('jax_ready_topic', '/mpcc/jax_ready')
 
         # parameters
         self.ANGLE_STEP           = self.get_parameter('angle_step').value
@@ -175,6 +178,8 @@ class ParticleFiler(Node):
             0.0,
             float(self.get_parameter('relocalize_exclusion_radius').value),
         )
+        self.WAIT_FOR_JAX_READY = bool(self.get_parameter('wait_for_jax_ready').value)
+        self.JAX_READY_TOPIC = str(self.get_parameter('jax_ready_topic').value)
 
         if self.PUBLISH_TF_MODE not in ('map_to_base_link', 'map_to_odom'):
             self.get_logger().warning(
@@ -222,36 +227,35 @@ class ParticleFiler(Node):
         self.particles = np.zeros((self.MAX_PARTICLES, 3), dtype=np.float32)
         self.weights = np.ones(self.MAX_PARTICLES, dtype=np.float64) / float(self.MAX_PARTICLES)
 
-        # Optional CuPy acceleration for resampling and motion updates.
-        self.cupy_enabled = False
-        if self.GPU_RESAMPLE_MOTION:
-            if cp is None:
-                self.get_logger().warning('gpu_resample_motion enabled, but cupy is not installed. Falling back to numpy.')
-            else:
-                try:
-                    cp.cuda.Device(int(self.CUPY_DEVICE_ID)).use()
-                    self.cupy_enabled = True
-                    self.local_deltas_gpu = cp.zeros((self.MAX_PARTICLES, 3), dtype=cp.float32)
-                except Exception as ex:
-                    self.get_logger().warning('Failed to initialize cupy on device %d: %s. Falling back to numpy.' % (
-                        int(self.CUPY_DEVICE_ID), str(ex)
-                    ))
-                    self.cupy_enabled = False
-
-        # initialize the state
+        # Keep the state containers cheap to construct. The map, range model,
+        # CuPy buffers, and initial particle population are initialized only
+        # after MPCC has finished its JAX warmup when the handshake is enabled.
         self.smoothing = Utils.CircularArray(10)
         self.timer = Utils.Timer(10)
-        # map service client
         self.map_client = self.create_client(GetMap, '/map_server/map')
-        self.get_omap()
-        self.precompute_sensor_model()
-        self.initialize_global()
-        if self.cupy_enabled and not self.RANGE_METHOD_IS_GPU:
-            self.get_logger().warning('cupy acceleration enabled, but range_method backend is CPU. Only resampling/motion run on GPU.')
-        if self.cupy_enabled:
-            self.get_logger().info('CuPy backend enabled for proposal + motion updates (device %d)' % int(self.CUPY_DEVICE_ID))
-        elif self.GPU_RESAMPLE_MOTION:
-            self.get_logger().info('CuPy backend not active; proposal + motion updates are on CPU.')
+        self._filter_initialized = False
+        self.jax_ready_sub = None
+        self._map_init_future = None
+        self._map_init_timer = None
+        if self.WAIT_FOR_JAX_READY:
+            readiness_qos = QoSProfile(
+                history=HistoryPolicy.KEEP_LAST,
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            )
+            self.jax_ready_sub = self.create_subscription(
+                Bool,
+                self.JAX_READY_TOPIC,
+                self._jax_ready_cb,
+                readiness_qos,
+            )
+            self.get_logger().info(
+                'Waiting for MPCC JAX readiness on %s before allocating PF GPU state'
+                % self.JAX_READY_TOPIC
+            )
+        else:
+            self._initialize_filter_backend()
 
         # keep track of speed from input odom
         self.current_speed = 0.0
@@ -306,58 +310,111 @@ class ParticleFiler(Node):
             )
         )
 
-    def get_omap(self):
+    def _jax_ready_cb(self, msg):
+        if bool(msg.data) and not self._filter_initialized:
+            self.get_logger().info(
+                'MPCC JAX ready; initializing particle-filter map, sensor model, and GPU state'
+            )
+            self._initialize_filter_backend()
+
+    def _initialize_filter_backend(self):
+        """Allocate the PF backend only after the optional JAX handshake."""
+        if self._filter_initialized:
+            return
+
+        self.cupy_enabled = False
+        if self.GPU_RESAMPLE_MOTION:
+            if cp is None:
+                self.get_logger().warning(
+                    'gpu_resample_motion enabled, but cupy is not installed. Falling back to numpy.'
+                )
+            else:
+                try:
+                    cp.cuda.Device(int(self.CUPY_DEVICE_ID)).use()
+                    self.cupy_enabled = True
+                    self.local_deltas_gpu = cp.zeros(
+                        (self.MAX_PARTICLES, 3), dtype=cp.float32
+                    )
+                except Exception as ex:
+                    self.get_logger().warning(
+                        'Failed to initialize cupy on device %d: %s. Falling back to numpy.'
+                        % (int(self.CUPY_DEVICE_ID), str(ex))
+                    )
+                    self.cupy_enabled = False
+
+        if self.WAIT_FOR_JAX_READY:
+            # Do not recursively spin the launch executor from the readiness
+            # subscription callback. Poll the map service asynchronously.
+            self._map_init_timer = self.create_timer(
+                0.05, self._poll_deferred_map_initialization
+            )
+            return
+
+        self.get_omap()
+        self.precompute_sensor_model()
+        self.initialize_global()
+        self._finish_filter_initialization()
+
+    def _poll_deferred_map_initialization(self):
+        """Complete PF setup without nested spinning of the ROS executor."""
+        if self._filter_initialized:
+            if self._map_init_timer is not None:
+                self.destroy_timer(self._map_init_timer)
+                self._map_init_timer = None
+            return
+        if self._map_init_future is None:
+            if not self.map_client.service_is_ready():
+                return
+            self._map_init_future = self.map_client.call_async(GetMap.Request())
+            return
+        if not self._map_init_future.done():
+            return
+        future = self._map_init_future
+        self._map_init_future = None
+        try:
+            response = future.result()
+            candidate = response.map if response is not None else None
+            if candidate is None or candidate.info.resolution <= 0.0:
+                self.get_logger().warning(
+                    'Deferred map request returned an invalid map; retrying.'
+                )
+                return
+            self.get_omap(candidate)
+            self.precompute_sensor_model()
+            self.initialize_global()
+            self._finish_filter_initialization()
+            if self._map_init_timer is not None:
+                self.destroy_timer(self._map_init_timer)
+                self._map_init_timer = None
+        except Exception as ex:
+            self.get_logger().warning(
+                'Deferred particle-filter initialization failed: %s; retrying.' % str(ex)
+            )
+
+    def _finish_filter_initialization(self):
+        self._filter_initialized = True
+        if self.cupy_enabled and not self.RANGE_METHOD_IS_GPU:
+            self.get_logger().warning(
+                'cupy acceleration enabled, but range_method backend is CPU. '
+                'Only resampling/motion run on GPU.'
+            )
+        if self.cupy_enabled:
+            self.get_logger().info(
+                'CuPy backend enabled for proposal + motion updates (device %d)'
+                % int(self.CUPY_DEVICE_ID)
+            )
+        elif self.GPU_RESAMPLE_MOTION:
+            self.get_logger().info(
+                'CuPy backend not active; proposal + motion updates are on CPU.'
+            )
+
+    def get_omap(self, map_msg=None):
         '''
         Fetch the occupancy grid map from the map_server instance, and initialize the correct
         RangeLibc method. Also stores a matrix which indicates the permissible region of the map
         '''
 
-        map_msg = None
-        while rclpy.ok():
-            while not self.map_client.wait_for_service(timeout_sec=1.0):
-                self.get_logger().info('Get map service not available, waiting...')
-                if not rclpy.ok():
-                    raise RuntimeError('ROS shut down while waiting for map service.')
-
-            req = GetMap.Request()
-            future = self.map_client.call_async(req)
-            rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
-
-            if not future.done():
-                self.get_logger().warning(
-                    'Map service request timed out; waiting for map_server activation.'
-                )
-                continue
-
-            try:
-                response = future.result()
-            except Exception as ex:
-                self.get_logger().warning(
-                    'Map service request failed: %s. Retrying.' % str(ex)
-                )
-                continue
-
-            if response is None:
-                self.get_logger().warning(
-                    'Map service returned no response; retrying.'
-                )
-                continue
-
-            candidate = response.map
-            if (
-                candidate.info.resolution <= 0.0
-                or candidate.info.width <= 0
-                or candidate.info.height <= 0
-                or len(candidate.data) == 0
-            ):
-                self.get_logger().warning(
-                    'Map server is not active or returned an empty map; retrying.'
-                )
-                time.sleep(0.25)
-                continue
-
-            map_msg = candidate
-            break
+        map_msg = map_msg if map_msg is not None else self._request_map_blocking()
 
         if map_msg is None:
             raise RuntimeError('Unable to obtain a valid occupancy map.')
@@ -405,6 +462,43 @@ class ParticleFiler(Node):
         self.permissible_region = np.zeros_like(array_255, dtype=bool)
         self.permissible_region[array_255==0] = 1
         self.map_initialized = True
+
+    def _request_map_blocking(self):
+        """Fetch a map during legacy non-gated startup before the executor spins."""
+        while rclpy.ok():
+            while not self.map_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().info('Get map service not available, waiting...')
+                if not rclpy.ok():
+                    raise RuntimeError('ROS shut down while waiting for map service.')
+
+            future = self.map_client.call_async(GetMap.Request())
+            rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+            if not future.done():
+                self.get_logger().warning(
+                    'Map service request timed out; waiting for map_server activation.'
+                )
+                continue
+            try:
+                response = future.result()
+            except Exception as ex:
+                self.get_logger().warning(
+                    'Map service request failed: %s. Retrying.' % str(ex)
+                )
+                continue
+            candidate = response.map if response is not None else None
+            if candidate is None or (
+                candidate.info.resolution <= 0.0
+                or candidate.info.width <= 0
+                or candidate.info.height <= 0
+                or len(candidate.data) == 0
+            ):
+                self.get_logger().warning(
+                    'Map server is not active or returned an empty map; retrying.'
+                )
+                time.sleep(0.25)
+                continue
+            return candidate
+        raise RuntimeError('Unable to obtain a valid occupancy map.')
 
     def publish_tf(self, pose, stamp=None):
         '''Publish the localization TF output for the car.'''
@@ -523,6 +617,8 @@ class ParticleFiler(Node):
         '''
         Initializes reused buffers, and stores the relevant laser scanner data for later use.
         '''
+        if not self._filter_initialized:
+            return
         if not isinstance(self.laser_angles, np.ndarray):
             self.get_logger().info('...Received first LiDAR message')
             self.laser_angles = np.linspace(msg.angle_min, msg.angle_max, len(msg.ranges))
@@ -543,6 +639,8 @@ class ParticleFiler(Node):
 
         Odometry data is accumulated via dead reckoning, so it is very inaccurate on its own.
         '''
+        if not self._filter_initialized:
+            return
         position = np.array([
             msg.pose.pose.position.x,
             msg.pose.pose.position.y])
@@ -580,6 +678,8 @@ class ParticleFiler(Node):
         '''
         Receive pose messages from RViz and initialize the particle distribution in response.
         '''
+        if not self._filter_initialized:
+            return
         if isinstance(msg, PointStamped):
             self.initialize_global()
         elif isinstance(msg, PoseWithCovarianceStamped):
@@ -587,6 +687,8 @@ class ParticleFiler(Node):
 
     def joyCB(self, msg):
         """Globally relocalize on the rising edge of the configured joystick button."""
+        if not self._filter_initialized:
+            return
         pressed = (
             0 <= self.RELOCALIZE_BUTTON_INDEX < len(msg.buttons)
             and msg.buttons[self.RELOCALIZE_BUTTON_INDEX] == 1
