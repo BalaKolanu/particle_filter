@@ -15,8 +15,9 @@ particle_filter:
     # fail fast if GPU ray marching is unavailable
     require_gpu: true
     theta_discretization: 112
-    # optional CuPy offload for proposal sampling + motion model
-    gpu_resample_motion: true
+    # Match the upstream PF: keep RangeLibc ray marching on GPU, but use
+    # NumPy for proposal resampling and motion updates.
+    gpu_resample_motion: false
     cupy_device_id: 0
     # range data filtering
     max_range: 10
