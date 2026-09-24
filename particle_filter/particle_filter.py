@@ -400,8 +400,9 @@ class ParticleFiler(Node):
             )
         if self.cupy_enabled:
             self.get_logger().info(
-                'CuPy backend enabled for proposal + motion updates (device %d)'
-                % int(self.CUPY_DEVICE_ID)
+                'CuPy backend enabled for GPU systematic resampling + motion updates '
+                '(device %d, particles=%d)'
+                % (int(self.CUPY_DEVICE_ID), self.MAX_PARTICLES)
             )
         elif self.GPU_RESAMPLE_MOTION:
             self.get_logger().info(
@@ -805,6 +806,17 @@ class ParticleFiler(Node):
         proposal_dist_gpu[:,1] += cp.random.normal(loc=0.0, scale=self.MOTION_DISPERSION_Y, size=self.MAX_PARTICLES)
         proposal_dist_gpu[:,2] += cp.random.normal(loc=0.0, scale=self.MOTION_DISPERSION_THETA, size=self.MAX_PARTICLES)
 
+    def _systematic_resample_gpu(self, normalized_weights):
+        """Resample N particles without an N-by-N GPU temporary."""
+        particle_count = int(self.MAX_PARTICLES)
+        cumulative_weights = cp.cumsum(normalized_weights, dtype=cp.float32)
+        offset = cp.random.random_sample() / float(particle_count)
+        positions = (
+            cp.arange(particle_count, dtype=cp.float32) + offset
+        ) / float(particle_count)
+        indices = cp.searchsorted(cumulative_weights, positions, side='left')
+        return cp.minimum(indices, particle_count - 1).astype(cp.int32)
+
     def precompute_sensor_model(self):
         '''
         Generate and store a table which represents the sensor model. For each discrete computed
@@ -1015,7 +1027,7 @@ class ParticleFiler(Node):
                 weights_gpu /= weights_sum
             else:
                 weights_gpu[:] = 1.0 / float(self.MAX_PARTICLES)
-            proposal_indices_gpu = cp.random.choice(self.MAX_PARTICLES, self.MAX_PARTICLES, p=weights_gpu)
+            proposal_indices_gpu = self._systematic_resample_gpu(weights_gpu)
             proposal_distribution_gpu = self.particles_gpu[proposal_indices_gpu,:]
             proposal_distribution = cp.asnumpy(proposal_distribution_gpu)
         else:
