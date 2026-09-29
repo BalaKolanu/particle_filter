@@ -25,7 +25,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'particle_filter = particle_filter.particle_filter:main'
+            'particle_filter = particle_filter.particle_filter:main',
+            'pose_rate_watchdog = particle_filter.pose_rate_watchdog:main',
         ],
     },
 )

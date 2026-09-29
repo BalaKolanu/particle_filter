@@ -21,6 +21,9 @@
 # SOFTWARE.
 
 # ros2 python
+import os
+import signal
+
 import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -50,6 +53,7 @@ from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point, Pose, PoseStamped, PoseArray, Quaternion, PolygonStamped, Polygon, Point32, PoseWithCovarianceStamped, PointStamped, TransformStamped
 from nav_msgs.msg import Odometry
 from nav_msgs.srv import GetMap
+from std_srvs.srv import Trigger
 
 '''
 These flags indicate several variants of the sensor model. Only one of them is used at a time.
@@ -237,6 +241,9 @@ class ParticleFiler(Node):
         self.jax_ready_sub = None
         self._map_init_future = None
         self._map_init_timer = None
+        self.restart_service = self.create_service(
+            Trigger, '~/restart', self._restart_callback
+        )
         if self.WAIT_FOR_JAX_READY:
             readiness_qos = QoSProfile(
                 history=HistoryPolicy.KEEP_LAST,
@@ -309,6 +316,17 @@ class ParticleFiler(Node):
                 self.RELOCALIZE_EXCLUSION_RADIUS,
             )
         )
+
+    def _restart_callback(self, request, response):
+        """Request a process restart through the launch supervisor."""
+        del request
+        response.success = True
+        response.message = 'Particle filter restart requested'
+        self.get_logger().error(
+            'Pose-rate watchdog requested a restart; exiting for launch respawn.'
+        )
+        os.kill(os.getpid(), signal.SIGINT)
+        return response
 
     def _jax_ready_cb(self, msg):
         if bool(msg.data) and not self._filter_initialized:

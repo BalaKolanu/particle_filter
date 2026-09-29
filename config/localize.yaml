@@ -5,7 +5,7 @@ particle_filter:
     odometry_topic: '/odom'
     # range data downsampling
     angle_step: 18
-    max_particles: 4000
+    max_particles: 2000
     squash_factor: 2.2
     # visualization
     viz: 1
@@ -19,7 +19,7 @@ particle_filter:
     gpu_resample_motion: false
     cupy_device_id: 0
     # range data filtering
-    max_range: 10
+    max_range: 20
     fine_timing: 0
     publish_odom: 1
     publish_tf_mode: 'map_to_base_link'

@@ -20,7 +20,7 @@ particle_filter:
     gpu_resample_motion: false
     cupy_device_id: 0
     # range data filtering
-    max_range: 10
+    max_range: 20
     fine_timing: 0
     publish_odom: 1
     # sensor model constants

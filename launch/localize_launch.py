@@ -24,6 +24,7 @@ from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.substitutions import LaunchConfiguration
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 import os
@@ -56,6 +57,18 @@ def generate_launch_description():
         'jax_ready_topic',
         default_value='/mpcc/jax_ready',
         description='Latched MPCC JAX readiness topic consumed by particle_filter')
+    pose_watchdog_enabled_la = DeclareLaunchArgument(
+        'pose_watchdog_enabled',
+        default_value='true',
+        description='Restart particle_filter if pose output stays below the configured rate')
+    pose_watchdog_minimum_rate_la = DeclareLaunchArgument(
+        'pose_watchdog_minimum_rate_hz',
+        default_value='30.0',
+        description='Minimum pose output rate before the watchdog requests a restart')
+    pose_watchdog_failure_duration_la = DeclareLaunchArgument(
+        'pose_watchdog_failure_duration_sec',
+        default_value='5.0',
+        description='How long the pose rate must remain low before restarting')
     use_sim_time_la = DeclareLaunchArgument(
         'use_sim_time',
         default_value='false',
@@ -68,6 +81,9 @@ def generate_launch_description():
             use_sim_time_la,
             wait_for_jax_ready_la,
             jax_ready_topic_la,
+            pose_watchdog_enabled_la,
+            pose_watchdog_minimum_rate_la,
+            pose_watchdog_failure_duration_la,
         ]
     )
 
@@ -76,6 +92,8 @@ def generate_launch_description():
         package='particle_filter',
         executable='particle_filter',
         name='particle_filter',
+        respawn=True,
+        respawn_delay=1.0,
         parameters=[
             LaunchConfiguration('localize_config'),
             {
@@ -126,5 +144,24 @@ def generate_launch_description():
     ld.add_action(nav_lifecycle_node)
     ld.add_action(map_server_node)
     ld.add_action(pf_node)
+
+    watchdog_node = Node(
+        package='particle_filter',
+        executable='pose_rate_watchdog',
+        name='pose_rate_watchdog',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('pose_watchdog_enabled')),
+        parameters=[
+            {
+                'minimum_rate_hz': LaunchConfiguration(
+                    'pose_watchdog_minimum_rate_hz'
+                ),
+                'failure_duration_sec': LaunchConfiguration(
+                    'pose_watchdog_failure_duration_sec'
+                ),
+            }
+        ],
+    )
+    ld.add_action(watchdog_node)
 
     return ld
