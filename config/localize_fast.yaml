@@ -9,7 +9,7 @@ particle_filter:
     squash_factor: 2.2
     # visualization
     viz: 0
-    max_viz_particles: 60
+    max_viz_particles: 0
     # ray marching method
     range_method: 'rmgpu'
     # fail fast if GPU ray marching is unavailable
