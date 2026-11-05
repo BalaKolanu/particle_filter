@@ -269,10 +269,19 @@ class ParticleFiler(Node):
 
         # Pub Subs
         # these topics are for visualization
-        self.pose_pub = self.create_publisher(PoseStamped, '/pf/viz/inferred_pose', 1)
-        self.particle_pub = self.create_publisher(PoseArray, '/pf/viz/particles', 1)
-        self.pub_fake_scan = self.create_publisher(LaserScan, '/pf/viz/fake_scan', 1)
-        self.rect_pub = self.create_publisher(PolygonStamped, '/pf/viz/poly1', 1)
+        if self.DO_VIZ:
+            self.pose_pub = self.create_publisher(PoseStamped, '/pf/viz/inferred_pose', 1)
+            self.particle_pub = self.create_publisher(PoseArray, '/pf/viz/particles', 1)
+            self.pub_fake_scan = self.create_publisher(LaserScan, '/pf/viz/fake_scan', 1)
+            self.rect_pub = self.create_publisher(PolygonStamped, '/pf/viz/poly1', 1)
+        else:
+            # Do not advertise visualization topics when visualization is off.
+            # This keeps them out of the ROS graph, rather than merely
+            # suppressing their messages at runtime.
+            self.pose_pub = None
+            self.particle_pub = None
+            self.pub_fake_scan = None
+            self.rect_pub = None
 
         if self.PUBLISH_ODOM:
             self.odom_pub = self.create_publisher(Odometry, '/pf/pose/odom', 1)
