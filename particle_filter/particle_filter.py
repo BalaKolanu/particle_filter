@@ -85,6 +85,10 @@ class ParticleFiler(Node):
         self.declare_parameter('motion_dispersion_theta')
         self.declare_parameter('scan_topic')
         self.declare_parameter('odometry_topic')
+        self.declare_parameter('laser_frame', 'laser')
+        self.declare_parameter('tf_child_frame', 'base_link')
+        self.declare_parameter('laser_to_base_x', 0.27)
+        self.declare_parameter('laser_to_base_y', 0.0)
 
         # parameters
         self.ANGLE_STEP           = self.get_parameter('angle_step').value
@@ -110,6 +114,10 @@ class ParticleFiler(Node):
         self.MOTION_DISPERSION_X     = self.get_parameter('motion_dispersion_x').value
         self.MOTION_DISPERSION_Y     = self.get_parameter('motion_dispersion_y').value
         self.MOTION_DISPERSION_THETA = self.get_parameter('motion_dispersion_theta').value
+        self.LASER_FRAME             = str(self.get_parameter('laser_frame').value)
+        self.TF_CHILD_FRAME          = str(self.get_parameter('tf_child_frame').value)
+        self.LASER_TO_BASE_X         = float(self.get_parameter('laser_to_base_x').value)
+        self.LASER_TO_BASE_Y         = float(self.get_parameter('laser_to_base_y').value)
         
         # various data containers used in the MCL algorithm
         self.MAX_RANGE_PX = None
@@ -240,16 +248,18 @@ class ParticleFiler(Node):
         if stamp == None:
             stamp = self.get_clock().now().to_msg()
 
+        base_pose = self._laser_pose_to_base_pose(pose)
+
         t = TransformStamped()
         # header
         t.header.stamp = stamp
         t.header.frame_id = '/map'
-        t.child_frame_id = '/laser'
+        t.child_frame_id = self.TF_CHILD_FRAME
         # translation
-        t.transform.translation.x = pose[0]
-        t.transform.translation.y = pose[1]
+        t.transform.translation.x = base_pose[0]
+        t.transform.translation.y = base_pose[1]
         t.transform.translation.z = 0.0
-        q = tf_transformations.quaternion_from_euler(0., 0., pose[2])
+        q = tf_transformations.quaternion_from_euler(0., 0., base_pose[2])
         # rotation
         t.transform.rotation.x = q[0]
         t.transform.rotation.y = q[1]
@@ -261,15 +271,26 @@ class ParticleFiler(Node):
             odom = Odometry()
             odom.header.stamp = self.get_clock().now().to_msg()
             odom.header.frame_id = '/map'
-            odom.pose.pose.position.x = pose[0]
-            odom.pose.pose.position.y = pose[1]
-            odom.pose.pose.orientation = Utils.angle_to_quaternion(pose[2])
+            odom.pose.pose.position.x = base_pose[0]
+            odom.pose.pose.position.y = base_pose[1]
+            odom.pose.pose.orientation = Utils.angle_to_quaternion(base_pose[2])
             cov_mat = np.cov(self.particles, rowvar=False, ddof=0, aweights=self.weights).flatten()
             odom.pose.covariance[:cov_mat.shape[0]] = cov_mat
             odom.twist.twist.linear.x = self.current_speed
             self.odom_pub.publish(odom)
         
         return
+
+    def _laser_pose_to_base_pose(self, laser_pose):
+        '''Convert a laser pose in map frame to the base_link pose.'''
+        theta = laser_pose[2]
+        dx = np.cos(theta) * self.LASER_TO_BASE_X - np.sin(theta) * self.LASER_TO_BASE_Y
+        dy = np.sin(theta) * self.LASER_TO_BASE_X + np.cos(theta) * self.LASER_TO_BASE_Y
+        return (
+            float(laser_pose[0] - dx),
+            float(laser_pose[1] - dy),
+            float(theta),
+        )
 
     def visualize(self):
         '''
@@ -283,9 +304,10 @@ class ParticleFiler(Node):
             ps = PoseStamped()
             ps.header.stamp = self.get_clock().now().to_msg()
             ps.header.frame_id = '/map'
-            ps.pose.position.x = self.inferred_pose[0]
-            ps.pose.position.y = self.inferred_pose[1]
-            ps.pose.orientation = Utils.angle_to_quaternion(self.inferred_pose[2])
+            base_pose = self._laser_pose_to_base_pose(self.inferred_pose)
+            ps.pose.position.x = base_pose[0]
+            ps.pose.position.y = base_pose[1]
+            ps.pose.orientation = Utils.angle_to_quaternion(base_pose[2])
             self.pose_pub.publish(ps)
 
         if self.particle_pub.get_subscription_count() > 0:
@@ -318,7 +340,7 @@ class ParticleFiler(Node):
         # publish the given angels and ranges as a laser scan message
         ls = LaserScan()
         ls.header.stamp = self.last_stamp
-        ls.header.frame_id = '/laser'
+        ls.header.frame_id = self.LASER_FRAME
         ls.angle_min = float(np.min(angles))
         ls.angle_max = float(np.max(angles))
         ls.angle_increment = float(np.abs(angles[0] - angles[1]))

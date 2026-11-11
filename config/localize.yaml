@@ -3,18 +3,23 @@ particle_filter:
     # topic names
     scan_topic: '/scan'
     odometry_topic: '/odom'
+    # Vehicle geometry: the LiDAR is 0.27 m ahead of base_link.
+    laser_frame: 'laser'
+    tf_child_frame: 'base_link'
+    laser_to_base_x: 0.27
+    laser_to_base_y: 0.0
     # range data downsampling
-    angle_step: 18
+    angle_step: 24
     max_particles: 4000
     squash_factor: 2.2
     # visualization
-    viz: 1
-    max_viz_particles: 60
+    viz: 0
+    max_viz_particles: 0
     # ray marching method
     range_method: 'rmgpu'
     theta_discretization: 112
     # range data filtering
-    max_range: 10
+    max_range: 20
     fine_timing: 0
     publish_odom: 1
     # sensor model constants
@@ -24,9 +29,9 @@ particle_filter:
     z_hit: 0.75
     sigma_hit: 8.0
     # motion model dispersion constants
-    motion_dispersion_x: 0.05
-    motion_dispersion_y: 0.025
-    motion_dispersion_theta: 0.25
+    motion_dispersion_x: 0.15
+    motion_dispersion_y: 0.06
+    motion_dispersion_theta: 0.35
     # sensor model variant, variant 2 good for rmgpu, 3 doesn't work for rmgpu
     rangelib_variant: 2
 
