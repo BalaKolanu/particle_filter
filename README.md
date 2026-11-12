@@ -1,65 +1,69 @@
-# Particle Filter Localization
+# particle_filter
 
-This code implements the MCL algorithm for the RACECAR. 
+## Purpose
 
-[![YouTube Demo](./media/thumb.jpg)](https://www.youtube.com/watch?v=-c_0hSjgLYw)
+ROS 2 Monte Carlo localization for F1TENTH. The node estimates the vehicle pose
+from a map, LiDAR scans, odometry, and an initial pose estimate. RangeLibc is
+used for accelerated 2D ray casting.
 
-For high efficiency in Python, it uses Numpy arrays and [RangeLibc](https://github.com/f1tenth/range_libc) for fast 2D ray casting.
+## Use
 
-# Installation
+Install dependencies and build from the workspace root:
 
-To run this, you need to ensure that both the map_server ROS package, and the python wrappers for RangeLibc are installed.
+~~~bash
+rosdep install --from-paths src --ignore-src -r -y
+colcon build --symlink-install
+source install/setup.bash
+~~~
 
-For the map server:
-```
-sudo apt-get update
-rosdep install -r --from-paths src --ignore-src --rosdistro kinetic -y
-```
+Launch localization:
 
-For [RangeLibc](https://github.com/f1tenth/range_libc):
+~~~bash
+ros2 launch particle_filter localize_launch.py
+~~~
 
-```
-sudo pip install cython
-git clone http://github.com/kctess5/range_libc
-cd range_libc/pywrappers
-# on VM
-./compile.sh
-# on car - compiles GPU ray casting methods
-./compile_with_cuda.sh
-```
+Initialize the filter in RViz with a 2D Pose Estimate.
 
-# Usage
+## Configuration
 
-The majority of parameters you might want to tweak are in the launch/localize.launch file. You may have to modify the "odometry_topic" or "scan_topic" parameters to match your environment.
+The main file is:
 
-```
-roslaunch particle_filter localize.launch
-```
+~~~text
+config/localize.yaml
+~~~
 
-Once the particle filter is running, you can visualize the map and other particle filter visualization message in RViz. Use the "2D Pose Estimate" tool from the RViz toolbar to initialize the particle locations.
+Important parameters include:
 
-See [launch/localize.launch](/particle_filter/launch/localize.launch) for docs on available parameters and arguments.
+- map_server.map: map name under maps/
+- laser_frame and tf_child_frame
+- laser-to-base offset parameters
+- scan and odometry topics
+- particle count, update thresholds, and motion-model noise
+- range_method and ray-casting settings
 
-The "range_method" parameter determines which RangeLibc ray casting method to use. The default is cddt because it is fast and has a low initialization time. The fastest option on the CPU is "glt" but it has a slow startup. The fastest version if you have can compile RangeLibc with CUDA enabled is "rmgpu". See this performance comparison chart:
+Map YAML and image files belong under maps/. The selected map must match the
+frame and resolution used by the LiDAR and SLAM pipeline.
 
-![Range Method Performance Comparison](./media/comparison.png)
+## Interfaces
 
-# Docs
+Inputs:
 
-This code is the staff solution to the lab guide found in the [/docs](/particle_filter/docs) folder. A mathematical derivation of MCL is available in that guide.
+- LiDAR LaserScan
+- odometry
+- initial pose estimate
 
-There is also documentation on RangeLibc in the [/docs](/particle_filter/docs) folder.
+Outputs include:
 
-The code itself also contains comments describing purpose of each method.
+- localized pose and particle-filter visualization topics
+- TF and odometry outputs configured by localize.yaml
 
-# Cite
+The launch also uses nav2_map_server and nav2_lifecycle_manager.
 
-This library accompanies the following [publication](http://arxiv.org/abs/1705.01167).
+## Theory and further reading
 
-    @article{walsh17,
-        author = {Corey Walsh and 
-                  Sertac Karaman},
-        title  = {CDDT: Fast Approximate 2D Ray Casting for Accelerated Localization},
-        volume = {abs/1705.01167},
-        url    = {http://arxiv.org/abs/1705.01167},
-        year   = {2017}}
+The implementation is Monte Carlo Localization: particles represent pose
+hypotheses, the motion model propagates them, and LiDAR likelihoods reweight
+them against the map. For deeper study, see the
+[original CDDT paper](https://arxiv.org/abs/1705.01167), the
+[RangeLibc repository](https://github.com/f1tenth/range_libc), and the
+[Nav2 map server documentation](https://docs.nav2.org/configuration/packages/map_server/configuring-map-server.html).
