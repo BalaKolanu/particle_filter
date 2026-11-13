@@ -1,11 +1,10 @@
+import math
+import time
 import numpy as np
 
 from std_msgs.msg import Header
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point, Pose, PoseStamped, PoseArray, Quaternion, PolygonStamped, Polygon, Point32, PoseWithCovarianceStamped, PointStamped
-import tf_transformations
-# import tf2_ros
-import time
 
 class CircularArray(object):
     """ Simple implementation of a circular array.
@@ -50,22 +49,21 @@ class Timer:
         return self.arr.mean()
 
 def angle_to_quaternion(angle):
-    """Convert an angle in radians into a quaternion _message_."""
-    q = tf_transformations.quaternion_from_euler(0, 0, angle)
+    """Convert a yaw angle in radians into a Quaternion message."""
+    half = 0.5 * angle
     q_out = Quaternion()
-    q_out.x = q[0]
-    q_out.y = q[1]
-    q_out.z = q[2]
-    q_out.w = q[3]
+    q_out.x = 0.0
+    q_out.y = 0.0
+    q_out.z = math.sin(half)
+    q_out.w = math.cos(half)
     return q_out
 
 def quaternion_to_angle(q):
-    """Convert a quaternion _message_ into an angle in radians.
-    The angle represents the yaw.
-    This is not just the z component of the quaternion."""
+    """Convert a Quaternion message into a yaw angle in radians."""
     x, y, z, w = q.x, q.y, q.z, q.w
-    roll, pitch, yaw = tf_transformations.euler_from_quaternion((x, y, z, w))
-    return yaw
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return math.atan2(siny_cosp, cosy_cosp)
 
 def rotation_matrix(theta):
     ''' Creates a rotation matrix for the given angle in radians '''
@@ -75,9 +73,9 @@ def rotation_matrix(theta):
 def particle_to_pose(particle):
     ''' Converts a particle in the form [x, y, theta] into a Pose object '''
     pose = Pose()
-    pose.position.x = particle[0]
-    pose.position.y = particle[1]
-    pose.orientation = angle_to_quaternion(particle[2])
+    pose.position.x = float(particle[0])
+    pose.position.y = float(particle[1])
+    pose.orientation = angle_to_quaternion(float(particle[2]))
     return pose
 
 def particles_to_poses(particles):

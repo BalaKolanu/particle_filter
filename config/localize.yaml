@@ -10,11 +10,11 @@ particle_filter:
     laser_to_base_y: 0.0
     # range data downsampling
     angle_step: 24
-    max_particles: 4000
+    max_particles: 800
     squash_factor: 2.2
     # visualization
     viz: 0
-    max_viz_particles: 0
+    max_viz_particles: 30
     # ray marching method
     range_method: 'rmgpu'
     theta_discretization: 112
@@ -28,10 +28,10 @@ particle_filter:
     z_rand: 0.12
     z_hit: 0.75
     sigma_hit: 8.0
-    # motion model dispersion constants
-    motion_dispersion_x: 0.15
-    motion_dispersion_y: 0.06
-    motion_dispersion_theta: 0.35
+    # motion model dispersion constants (tuned for lower particle count; raise on real robot if tracking is lost)
+    motion_dispersion_x: 0.03
+    motion_dispersion_y: 0.015
+    motion_dispersion_theta: 0.06
     # sensor model variant, variant 2 good for rmgpu, 3 doesn't work for rmgpu
     rangelib_variant: 2
 

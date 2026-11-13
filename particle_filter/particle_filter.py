@@ -25,17 +25,18 @@ import rclpy
 from rclpy.node import Node
 
 # libraries
+import gc
+import math
+from collections import deque
+from threading import Lock
+import time
+
 import numpy as np
 import range_libc
-import time
-from threading import Lock
 from particle_filter import utils as Utils
 
 # TF
-# import tf.transformations
-# import tf
 from tf2_ros import TransformBroadcaster
-import tf_transformations
 
 # messages
 from std_msgs.msg import String, Header, Float32MultiArray
@@ -135,6 +136,7 @@ class ParticleFiler(Node):
         self.last_time = None
         self.last_stamp = None
         self.first_sensor_update = True
+        self.odom_msg_count = 0
         self.state_lock = Lock()
 
         # cache this to avoid memory allocation in motion model
@@ -146,11 +148,14 @@ class ParticleFiler(Node):
         self.tiled_angles = None
         self.sensor_model_table = None
 
-        # particle poses and weights
+        # particle poses, weights, and pre-allocated resampling buffers
         self.inferred_pose = None
-        self.particle_indices = np.arange(self.MAX_PARTICLES)
         self.particles = np.zeros((self.MAX_PARTICLES, 3))
+        self.proposal_distribution = np.zeros((self.MAX_PARTICLES, 3))
         self.weights = np.ones(self.MAX_PARTICLES) / float(self.MAX_PARTICLES)
+        self._u_offsets = np.arange(self.MAX_PARTICLES, dtype=np.float64) / float(self.MAX_PARTICLES)
+        self._positions = np.empty(self.MAX_PARTICLES, dtype=np.float64)
+        self._cdf = np.empty(self.MAX_PARTICLES, dtype=np.float64)
 
         # initialize the state
         self.smoothing = Utils.CircularArray(10)
@@ -173,6 +178,21 @@ class ParticleFiler(Node):
 
         if self.PUBLISH_ODOM:
             self.odom_pub = self.create_publisher(Odometry, '/pf/pose/odom', 1)
+
+        # pre-allocated output messages mutated each frame
+        self.tf_msg = TransformStamped()
+        self.tf_msg.header.frame_id = '/map'
+        self.tf_msg.child_frame_id = self.TF_CHILD_FRAME
+        self.tf_msg.transform.translation.z = 0.0
+        self.tf_msg.transform.rotation.x = 0.0
+        self.tf_msg.transform.rotation.y = 0.0
+
+        self.odom_msg = Odometry()
+        self.odom_msg.header.frame_id = '/map'
+        self.odom_msg.pose.pose.position.z = 0.0
+        self.odom_msg.pose.pose.orientation.x = 0.0
+        self.odom_msg.pose.pose.orientation.y = 0.0
+        self.odom_msg.pose.covariance = [0.0] * 36
 
         # these topics are for coordinate space things
         self.pub_tf = TransformBroadcaster(self)
@@ -235,68 +255,126 @@ class ParticleFiler(Node):
             self.range_method = range_libc.PyGiantLUTCast(oMap, self.MAX_RANGE_PX, self.THETA_DISCRETIZATION)
         self.get_logger().info('Done loading map')
 
-         # 0: permissible, -1: unmapped, 100: blocked
-        array_255 = np.array(map_msg.data).reshape((map_msg.info.height, map_msg.info.width))
-
-        # 0: not permissible, 1: permissible
-        self.permissible_region = np.zeros_like(array_255, dtype=bool)
-        self.permissible_region[array_255==0] = 1
+        # 0: permissible, -1: unmapped, 100: blocked
+        array_255 = np.array(map_msg.data, dtype=np.int8).reshape((map_msg.info.height, map_msg.info.width))
+        self.permissible_region = self._compute_permissible_region(array_255)
         self.map_initialized = True
+
+    def _compute_permissible_region(self, array_255):
+        '''Restrict permissible particle region to free cells reachable from world (0, 0) via 4x BFS.'''
+        free_mask = (array_255 == 0)
+        height, width = free_mask.shape
+        if height == 0 or width == 0:
+            return free_mask
+
+        pad_h = (-height) % 4
+        pad_w = (-width) % 4
+        if pad_h or pad_w:
+            padded = np.pad(free_mask, ((0, pad_h), (0, pad_w)), mode='constant', constant_values=False)
+        else:
+            padded = free_mask
+        coarse_h = padded.shape[0] // 4
+        coarse_w = padded.shape[1] // 4
+        coarse_free = padded.reshape(coarse_h, 4, coarse_w, 4).any(axis=(1, 3))
+
+        seed = np.array([[0.0, 0.0, 0.0]], dtype=np.float64)
+        Utils.world_to_map(seed, self.map_info)
+        seed_col = int(round(seed[0, 0]))
+        seed_row = int(round(seed[0, 1]))
+        start_r = seed_row // 4
+        start_c = seed_col // 4
+
+        if not (0 <= start_r < coarse_h and 0 <= start_c < coarse_w and coarse_free[start_r, start_c]):
+            # Check immediate coarse neighbors in case (0, 0) sits right on a boundary pixel
+            found = None
+            for dr in range(-2, 3):
+                for dc in range(-2, 3):
+                    nr, nc = start_r + dr, start_c + dc
+                    if 0 <= nr < coarse_h and 0 <= nc < coarse_w and coarse_free[nr, nc]:
+                        found = (nr, nc)
+                        break
+                if found is not None:
+                    break
+            if found is None:
+                self.get_logger().warning('Flood-fill seed (0, 0) not in free space; using all free cells')
+                return free_mask
+            start_r, start_c = found
+
+        visited = np.zeros((coarse_h, coarse_w), dtype=bool)
+        visited[start_r, start_c] = True
+        queue = deque([(start_r, start_c)])
+        while queue:
+            r, c = queue.popleft()
+            if r > 0 and coarse_free[r - 1, c] and not visited[r - 1, c]:
+                visited[r - 1, c] = True
+                queue.append((r - 1, c))
+            if r + 1 < coarse_h and coarse_free[r + 1, c] and not visited[r + 1, c]:
+                visited[r + 1, c] = True
+                queue.append((r + 1, c))
+            if c > 0 and coarse_free[r, c - 1] and not visited[r, c - 1]:
+                visited[r, c - 1] = True
+                queue.append((r, c - 1))
+            if c + 1 < coarse_w and coarse_free[r, c + 1] and not visited[r, c + 1]:
+                visited[r, c + 1] = True
+                queue.append((r, c + 1))
+
+        reachable = np.repeat(np.repeat(visited, 4, axis=0), 4, axis=1)[:height, :width]
+        return free_mask & reachable
 
     def publish_tf(self, pose, stamp=None):
         ''' Publish a tf for the car. This tells ROS where the car is with respect to the map. '''
-        if stamp == None:
+        if stamp is None:
             stamp = self.get_clock().now().to_msg()
 
         base_pose = self._laser_pose_to_base_pose(pose)
+        half = 0.5 * base_pose[2]
+        qz = math.sin(half)
+        qw = math.cos(half)
 
-        t = TransformStamped()
-        # header
+        t = self.tf_msg
         t.header.stamp = stamp
-        t.header.frame_id = '/map'
-        t.child_frame_id = self.TF_CHILD_FRAME
-        # translation
         t.transform.translation.x = base_pose[0]
         t.transform.translation.y = base_pose[1]
-        t.transform.translation.z = 0.0
-        q = tf_transformations.quaternion_from_euler(0., 0., base_pose[2])
-        # rotation
-        t.transform.rotation.x = q[0]
-        t.transform.rotation.y = q[1]
-        t.transform.rotation.z = q[2]
-        t.transform.rotation.w = q[3]
+        t.transform.rotation.z = qz
+        t.transform.rotation.w = qw
         self.pub_tf.sendTransform(t)
+
         # also publish odometry to facilitate getting the localization pose
         if self.PUBLISH_ODOM:
-            odom = Odometry()
+            odom = self.odom_msg
             odom.header.stamp = self.get_clock().now().to_msg()
-            odom.header.frame_id = '/map'
             odom.pose.pose.position.x = base_pose[0]
             odom.pose.pose.position.y = base_pose[1]
-            odom.pose.pose.orientation = Utils.angle_to_quaternion(base_pose[2])
-            cov_mat = np.cov(self.particles, rowvar=False, ddof=0, aweights=self.weights).flatten()
-            odom.pose.covariance[:cov_mat.shape[0]] = cov_mat
-            odom.twist.twist.linear.x = self.current_speed
+            odom.pose.pose.orientation.z = qz
+            odom.pose.pose.orientation.w = qw
+            if self.iters % 5 == 0:
+                dx = self.particles[:, 0] - pose[0]
+                dy = self.particles[:, 1] - pose[1]
+                odom.pose.covariance[0] = float(np.dot(self.weights, dx * dx))
+                odom.pose.covariance[7] = float(np.dot(self.weights, dy * dy))
+            odom.twist.twist.linear.x = float(self.current_speed)
             self.odom_pub.publish(odom)
-        
+
         return
 
     def _laser_pose_to_base_pose(self, laser_pose):
         '''Convert a laser pose in map frame to the base_link pose.'''
-        theta = laser_pose[2]
-        dx = np.cos(theta) * self.LASER_TO_BASE_X - np.sin(theta) * self.LASER_TO_BASE_Y
-        dy = np.sin(theta) * self.LASER_TO_BASE_X + np.cos(theta) * self.LASER_TO_BASE_Y
+        theta = float(laser_pose[2])
+        c = math.cos(theta)
+        s = math.sin(theta)
+        dx = c * self.LASER_TO_BASE_X - s * self.LASER_TO_BASE_Y
+        dy = s * self.LASER_TO_BASE_X + c * self.LASER_TO_BASE_Y
         return (
             float(laser_pose[0] - dx),
             float(laser_pose[1] - dy),
-            float(theta),
+            theta,
         )
 
     def visualize(self):
         '''
-        Publish various visualization messages.
+        Publish various visualization messages every 5th iteration.
         '''
-        if not self.DO_VIZ:
+        if not self.DO_VIZ or (self.iters % 5 != 0):
             return
 
         if self.pose_pub.get_subscription_count() > 0 and isinstance(self.inferred_pose, np.ndarray):
@@ -311,12 +389,10 @@ class ParticleFiler(Node):
             self.pose_pub.publish(ps)
 
         if self.particle_pub.get_subscription_count() > 0:
-            # publish a downsampled version of the particle distribution to avoid a lot of latency
-            if self.MAX_PARTICLES > self.MAX_VIZ_PARTICLES:
-                # randomly downsample particles
-                proposal_indices = np.random.choice(self.particle_indices, self.MAX_VIZ_PARTICLES, p=self.weights)
-                # proposal_indices = np.random.choice(self.particle_indices, self.MAX_VIZ_PARTICLES)
-                self.publish_particles(self.particles[proposal_indices,:])
+            # publish a downsampled version of the particle distribution to avoid latency
+            if self.MAX_VIZ_PARTICLES > 0 and self.MAX_PARTICLES > self.MAX_VIZ_PARTICLES:
+                stride = max(1, self.MAX_PARTICLES // self.MAX_VIZ_PARTICLES)
+                self.publish_particles(self.particles[::stride][:self.MAX_VIZ_PARTICLES])
             else:
                 self.publish_particles(self.particles)
 
@@ -337,16 +413,17 @@ class ParticleFiler(Node):
         self.particle_pub.publish(pa)
 
     def publish_scan(self, angles, ranges):
-        # publish the given angels and ranges as a laser scan message
+        # publish the given angles and ranges as a laser scan message
+        ranges_list = ranges.tolist()
         ls = LaserScan()
         ls.header.stamp = self.last_stamp
         ls.header.frame_id = self.LASER_FRAME
         ls.angle_min = float(np.min(angles))
         ls.angle_max = float(np.max(angles))
         ls.angle_increment = float(np.abs(angles[0] - angles[1]))
-        ls.range_min = float(0)
-        ls.range_max = float(np.max(ranges))
-        ls.ranges = ranges.tolist()
+        ls.range_min = 0.0
+        ls.range_max = float(max(ranges_list)) if ranges_list else 0.0
+        ls.ranges = ranges_list
         self.pub_fake_scan.publish(ls)
 
     def lidarCB(self, msg):
@@ -368,33 +445,44 @@ class ParticleFiler(Node):
 
     def odomCB(self, msg):
         '''
-        Store deltas between consecutive odometry messages in the coordinate space of the car.
-
-        Odometry data is accumulated via dead reckoning, so it is very inaccurate on its own.
+        Store deltas between processed odometry messages (1 in 3) in the car's local frame.
         '''
-        position = np.array([
-            msg.pose.pose.position.x,
-            msg.pose.pose.position.y])
-
+        px = msg.pose.pose.position.x
+        py = msg.pose.pose.position.y
         orientation = Utils.quaternion_to_angle(msg.pose.pose.orientation)
-        pose = np.array([position[0], position[1], orientation])
         self.current_speed = msg.twist.twist.linear.x
 
-        if isinstance(self.last_pose, np.ndarray):
-            # changes in x,y,theta in local coordinate system of the car
-            rot = Utils.rotation_matrix(-self.last_pose[2])
-            delta = np.array([position - self.last_pose[0:2]]).transpose()
-            local_delta = (rot*delta).transpose()
-            
-            self.odometry_data = np.array([local_delta[0,0], local_delta[0,1], orientation - self.last_pose[2]])
-            self.last_pose = pose
-            self.last_stamp = msg.header.stamp
-            self.odom_initialized = True
-        else:
+        if self.last_pose is None:
             self.get_logger().info('...Received first Odometry message')
-            self.last_pose = pose
+            self.last_pose = np.array([px, py, orientation])
+            self.last_stamp = msg.header.stamp
+            self.odom_msg_count = 0
+            return
 
-        # this topic is slower than lidar, so update every time we receive a message
+        self.odom_msg_count += 1
+        if self.odom_msg_count % 3 != 0:
+            return
+
+        dx = px - self.last_pose[0]
+        dy = py - self.last_pose[1]
+        if math.hypot(dx, dy) > 1.0:
+            # Ignore teleport jumps (e.g. simulator reset) without injecting a huge motion delta
+            self.last_pose = np.array([px, py, orientation])
+            self.last_stamp = msg.header.stamp
+            return
+
+        c = math.cos(-self.last_pose[2])
+        s = math.sin(-self.last_pose[2])
+        dtheta = (orientation - self.last_pose[2] + math.pi) % (2.0 * math.pi) - math.pi
+
+        self.odometry_data[0] = c * dx - s * dy
+        self.odometry_data[1] = s * dx + c * dy
+        self.odometry_data[2] = dtheta
+        self.last_pose = np.array([px, py, orientation])
+        self.last_stamp = msg.header.stamp
+        self.odom_initialized = True
+
+        # this topic is slower than lidar, so update every time we process a message
         self.update()
 
     def clicked_pose(self, msg):
@@ -413,10 +501,14 @@ class ParticleFiler(Node):
         self.get_logger().info('SETTING POSE')
         self.get_logger().info(str([pose.position.x, pose.position.y]))
         self.state_lock.acquire()
-        self.weights = np.ones(self.MAX_PARTICLES) / float(self.MAX_PARTICLES)
-        self.particles[:,0] = pose.position.x + np.random.normal(loc=0.0,scale=0.5,size=self.MAX_PARTICLES)
-        self.particles[:,1] = pose.position.y + np.random.normal(loc=0.0,scale=0.5,size=self.MAX_PARTICLES)
-        self.particles[:,2] = Utils.quaternion_to_angle(pose.orientation) + np.random.normal(loc=0.0,scale=0.4,size=self.MAX_PARTICLES)
+        self.weights[:] = 1.0 / float(self.MAX_PARTICLES)
+        self.particles[:,0] = pose.position.x + np.random.normal(loc=0.0,scale=0.15,size=self.MAX_PARTICLES)
+        self.particles[:,1] = pose.position.y + np.random.normal(loc=0.0,scale=0.15,size=self.MAX_PARTICLES)
+        self.particles[:,2] = Utils.quaternion_to_angle(pose.orientation) + np.random.normal(loc=0.0,scale=0.1,size=self.MAX_PARTICLES)
+        self.last_pose = None
+        self.odometry_data[:] = 0.0
+        self.odom_msg_count = 0
+        self.odom_initialized = False
         self.state_lock.release()
 
     def initialize_global(self):
@@ -488,9 +580,11 @@ class ParticleFiler(Node):
             # normalize
             self.sensor_model_table[:,int(d)] /= norm
 
-        # upload the sensor model to RangeLib for ultra fast resolution
+        # upload the sensor model to RangeLib for ultra fast resolution and release Python table
         if self.RANGELIB_VAR > 0:
             self.range_method.set_sensor_model(self.sensor_model_table)
+            self.sensor_model_table = None
+            gc.collect()
 
     def motion_model(self, proposal_dist, action):
         '''
@@ -635,24 +729,33 @@ class ParticleFiler(Node):
         '''
         if self.SHOW_FINE_TIMING:
             t = time.time()
-        # draw the proposal distribution from the old particles
-        proposal_indices = np.random.choice(self.particle_indices, self.MAX_PARTICLES, p=self.weights)
-        proposal_distribution = self.particles[proposal_indices,:]
+        # low-variance systematic resampling into pre-allocated proposal_distribution
+        np.cumsum(self.weights, out=self._cdf)
+        self._cdf[-1] = 1.0
+        r = np.random.random() / float(self.MAX_PARTICLES)
+        np.add(self._u_offsets, r, out=self._positions)
+        proposal_indices = np.searchsorted(self._cdf, self._positions, side='right')
+        np.clip(proposal_indices, 0, self.MAX_PARTICLES - 1, out=proposal_indices)
+        np.take(self.particles, proposal_indices, axis=0, out=self.proposal_distribution)
         if self.SHOW_FINE_TIMING:
             t_propose = time.time()
 
         # compute the motion model to update the proposal distribution
-        self.motion_model(proposal_distribution, a)
+        self.motion_model(self.proposal_distribution, a)
         if self.SHOW_FINE_TIMING:
             t_motion = time.time()
 
         # compute the sensor model
-        self.sensor_model(proposal_distribution, o, self.weights)
+        self.sensor_model(self.proposal_distribution, o, self.weights)
         if self.SHOW_FINE_TIMING:
             t_sensor = time.time()
 
         # normalize importance weights
-        self.weights /= np.sum(self.weights)
+        weight_sum = np.sum(self.weights)
+        if weight_sum > 0.0:
+            self.weights /= weight_sum
+        else:
+            self.weights[:] = 1.0 / float(self.MAX_PARTICLES)
         if self.SHOW_FINE_TIMING:
             t_norm = time.time()
             t_total = (t_norm - t)/100.0
@@ -661,12 +764,16 @@ class ParticleFiler(Node):
             self.get_logger().info(str(['MCL: propose: ', np.round((t_propose-t)/t_total, 2), 'motion:', np.round((t_motion-t_propose)/t_total, 2), \
                   'sensor:', np.round((t_sensor-t_motion)/t_total, 2), 'norm:', np.round((t_norm-t_sensor)/t_total, 2)]))
 
-        # save the particles
-        self.particles = proposal_distribution
-    
+        # swap buffers without allocation
+        self.particles, self.proposal_distribution = self.proposal_distribution, self.particles
+
     def expected_pose(self):
-        # returns the expected value of the pose given the particle distribution
-        return np.dot(self.particles.transpose(), self.weights)
+        # returns the expected value of the pose using a circular mean for heading
+        x = float(np.dot(self.particles[:, 0], self.weights))
+        y = float(np.dot(self.particles[:, 1], self.weights))
+        cos_mean = float(np.dot(np.cos(self.particles[:, 2]), self.weights))
+        sin_mean = float(np.dot(np.sin(self.particles[:, 2]), self.weights))
+        return np.array([x, y, math.atan2(sin_mean, cos_mean)])
 
     def update(self):
         '''
@@ -685,7 +792,7 @@ class ParticleFiler(Node):
                 t1 = time.time()
                 observation = np.copy(self.downsampled_ranges).astype(np.float32)
                 action = np.copy(self.odometry_data)
-                self.odometry_data = np.zeros(3)
+                self.odometry_data[:] = 0.0
 
                 # run the MCL update algorithm
                 self.MCL(action, observation)
